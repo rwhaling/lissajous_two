@@ -321,7 +321,7 @@ void main() {
     vec4 blurredTrailAlphaSample = texture2D(u_blurredTrailGlowTex, texCoord); // RGB is (0,0,0) if trail was black
 
     // 1. Determine base color from the gradient
-    vec3 baseColor = mix(u_colorA, u_colorB, gradientSample.r);
+    vec3 baseColor = mix(u_colorA, u_colorB, gradientSample.b);
 
     // 2. Alpha-blend the core trail color (u_colorC) onto the baseColor.
     // The visibility of u_colorC is determined by fadedTrailAlphaSample.a.

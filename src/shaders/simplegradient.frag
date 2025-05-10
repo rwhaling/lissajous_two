@@ -148,6 +148,8 @@ void main() {
         blobNoise = 1.0 * u_noiseOffsetScale;
     } else if (noise < -threshold) {
         blobNoise = -1.0 * u_noiseOffsetScale;
+    } else {
+        blobNoise = 0.0;
     }
 
     // --- 5. Cubic dropoff for noise region, using the original y ---
@@ -168,10 +170,10 @@ void main() {
     float warpedY;
     if (noisyY < warpPoint) {
         // Map [0, warpPoint] -> [0, 0.5]
-        warpedY = 0.5 * (noisyY / max(warpPoint, 1e-5));
+        warpedY = 0.4 * (noisyY / max(warpPoint, 1e-5));
     } else {
         // Map [warpPoint, 1] -> [0.5, 1]
-        warpedY = 0.5 + 0.5 * ((noisyY - warpPoint) / max(1.0 - warpPoint, 1e-5));
+        warpedY = 0.4 + 0.3 * ((noisyY - warpPoint) / max(1.0 - warpPoint, 1e-5));
     }
     warpedY = clamp(warpedY, 0.0, 1.0);
 

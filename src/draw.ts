@@ -49,47 +49,52 @@ let dirHandle: FileSystemDirectoryHandle | null = null;
 const TOTAL_FRAMES = 5550; // Example value, adjust as needed
 
 // --- Step 2: Add Blur Parameters ---
-const BLUR_RADIUS = 5.0; // Example blur radius
-const BLUR_PASSES = 30;   // Example blur passes
-const FADE_FACTOR = 0.97; // Example fade factor
-const GLOW_PERSISTENCE = 0.8; // How much of the old glow persists
+const BLUR_RADIUS = 4.0; // Example blur radius
+const BLUR_PASSES = 5;   // Example blur passes
+const FADE_FACTOR = 0.995; // Example fade factor
+const GLOW_PERSISTENCE = 0.98; // How much of the old glow persists
 // Keep gradient noise parameters
-let NOISE_CENTER = 0.5;
-let NOISE_WIDTH = 1.0;
-let NOISE_AMPLITUDE = 0.6;
+let NOISE_CENTER = 0.0;
+let NOISE_WIDTH = 1.1;
+let NOISE_AMPLITUDE = 0.8;
 let NOISE_SPEED = 0.4;
 let NOISE_SCALE = 96.0;
-let NOISE_OFFSET_SCALE = 0.7;
+let NOISE_OFFSET_SCALE = 1.0;
 
 // Keep gradient wave parameters
 let WAVE_AMPLITUDE = 0.25;
-let WAVE_XSCALE = 1.5;      // NEW: x scale for the wave
-let WAVE_TIMESCALE = 0.3;   // NEW: time scale for the wave
+let WAVE_XSCALE = 2.5;      // NEW: x scale for the wave
+let WAVE_TIMESCALE = 0.2;   // NEW: time scale for the wave
 
 // Lissajous Parameters for the moving circle
-const LISSAJOUS_A = 4.25;
+const LISSAJOUS_A = 3.25;
 const LISSAJOUS_B = 2.75;
-const LISSAJOUS_AMPLITUDE = 200;
+const LISSAJOUS_AMPLITUDE = 300;
 const LISSAJOUS_RADIUS = 10; // px
-const LISSAJOUS_TIME_SCALE = 0.50; // Adjust for slower/faster movement
+const LISSAJOUS_TIME_SCALE = 0.35; // Adjust for slower/faster movement
 
 // Palette Colors
 let GRADIENT_COLOR_A = '#000000'; // Base Color A
-let GRADIENT_COLOR_B = '#0066FF'; // Base Color B
+let GRADIENT_COLOR_B = '#0044CC'; // Base Color B
 // --- Step 1: Add New Color Constants ---
 const PALETTE_COLOR_C = '#FFFF00'; // Color for opaque black elements
-const PALETTE_COLOR_D = '#FF00FF'; // Color for opaque white elements (unused for now)
+const PALETTE_COLOR_D = '#8800FF'; // Color for opaque white elements (unused for now)
 
 // --- New constants for multi-line drawing ---
-const LINES_PER_FRAME = 1000;
-const LINE_SUB_STEP_FRAME_FRACTION = 0.3 // Each sub-step is 20% of a frame's duration
-const LINE_THICKNESS = 4 // Desired thickness for each individual line segment
+const LINES_PER_FRAME = 1;
+const LINE_SUB_STEP_FRAME_FRACTION = 0.2 // Each sub-step is 20% of a frame's duration
+const LINE_THICKNESS = 2 // Desired thickness for each individual line segment
 
 // --- New constants for noise modulation of line length ---
-const LINE_NOISE_SPATIAL_SCALE = 350.0; // Adjust for spatial frequency of noise
-const LINE_NOISE_TIME_SCALE = 0.1;    // Adjust for temporal frequency of noise
-const LINE_NOISE_MIN_LENGTH_FACTOR = 0.2; // Min length as factor of LISSAJOUS_RADIUS
-const LINE_NOISE_MAX_LENGTH_FACTOR = 5.2; // Max length as factor of LISSAJOUS_RADIUS
+const LINE_NOISE_SPATIAL_SCALE = 550.0; // Adjust for spatial frequency of noise
+const LINE_NOISE_TIME_SCALE = 0.2;    // Adjust for temporal frequency of noise
+const LINE_NOISE_MIN_LENGTH_FACTOR = 3.2; // Min length as factor of LISSAJOUS_RADIUS
+const LINE_NOISE_MAX_LENGTH_FACTOR = 20.2; // Max length as factor of LISSAJOUS_RADIUS
+
+// --- New constants for endpoint noise displacement ---
+const LINE_ENDPOINT_NOISE_SCALAR = 1.5;    // Scales the normalized [0,1] noise before lerping
+const LINE_ENDPOINT_NOISE_AMOUNT_1 = 0.8;  // Noise influence for endpoint 1 (0-1)
+const LINE_ENDPOINT_NOISE_AMOUNT_2 = 0.6;  // Noise influence for endpoint 2 (0-1)
 
 // Add back frame padding helper
 function padFrameNumber(num: number): string {
@@ -359,75 +364,70 @@ export function draw({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     const timePerFrame = 1.0 / FRAMES_PER_SECOND;
     const subStepTimeDelta = timePerFrame * LINE_SUB_STEP_FRAME_FRACTION;
 
-    elementsCtx.strokeStyle = 'black'; // Line color
     elementsCtx.lineWidth = LINE_THICKNESS; // Set consistent line thickness
 
     for (let i = 0; i < LINES_PER_FRAME; i++) {
         const subSteppedCurrentTime = currentTime + i * subStepTimeDelta;
         const lissajousTime = subSteppedCurrentTime * LISSAJOUS_TIME_SCALE;
     
-        // Lissajous point for the current sub-step
+        // Lissajous point for the current sub-step (displacement from center)
         const argX = LISSAJOUS_A * lissajousTime + Math.PI / 2;
         const argY = LISSAJOUS_B * lissajousTime;
-        const currentCircleX = canvasCenterX + amplitudeX * Math.sin(argX);
-        const currentCircleY = canvasCenterY + amplitudeY * Math.sin(argY);
+        const lissaX = amplitudeX * Math.sin(argX);
+        const lissaY = amplitudeY * Math.sin(argY);
 
-        // Calculate velocity vector components for the current sub-step
-        const velocityX = amplitudeX * LISSAJOUS_A * Math.cos(argX);
-        const velocityY = amplitudeY * LISSAJOUS_B * Math.cos(argY);
+        // Calculate color based on progress through LINES_PER_FRAME
+        let fadeProgress = 0;
+        if (LINES_PER_FRAME > 1) {
+            fadeProgress = i / (LINES_PER_FRAME - 1);
+        }
+        
+        const colorVal = Math.round(255 * (1 - fadeProgress));
+        const strokeColor = `rgb(${colorVal},${colorVal},${colorVal})`;
+        elementsCtx.strokeStyle = strokeColor;
 
-        // Perpendicular vector to velocity
-        let perpDx = -velocityY;
-        let perpDy = velocityX;
+        // Determine if the Lissajous point is effectively at the center
+        if (Math.abs(lissaX) > 0.01 || Math.abs(lissaY) > 0.01) {
+            // Calculate noise-based scaling factors for endpoints
+            const noiseInputXBase = lissaX / LINE_NOISE_SPATIAL_SCALE;
+            const noiseInputYBase = lissaY / LINE_NOISE_SPATIAL_SCALE;
+            const noiseInputTime = subSteppedCurrentTime * LINE_NOISE_TIME_SCALE;
 
-        const magnitude = Math.sqrt(perpDx * perpDx + perpDy * perpDy);
+            // Noise for endpoint 1 (x, y)
+            let s_val_x1 = simplex.noise3D(noiseInputXBase, noiseInputYBase, noiseInputTime);
+            let s_val_y1 = simplex.noise3D(noiseInputXBase + 10.3, noiseInputYBase + 20.7, noiseInputTime + 5.1);
 
-        if (magnitude > 0.0001) { 
-            perpDx /= magnitude; // Normalize
-            perpDy /= magnitude; // Normalize
+            // Noise for endpoint 2 (x, y)
+            let s_val_x2 = simplex.noise3D(noiseInputXBase + 30.5, noiseInputYBase + 40.1, noiseInputTime + 15.9);
+            let s_val_y2 = simplex.noise3D(noiseInputXBase + 50.2, noiseInputYBase + 60.8, noiseInputTime + 25.4);
 
-            const baseLineHalfLength = LISSAJOUS_RADIUS;
+            // Helper function to calculate final scaling factor from raw simplex noise
+            const calculateFactor = (simplexVal: number, amount: number) => {
+                const normalized_simplex = (simplexVal + 1.0) / 2.0; // to [0,1]
+                const scaled_noise_term = normalized_simplex * LINE_ENDPOINT_NOISE_SCALAR;
+                return (1.0 - amount) * 1.0 + amount * scaled_noise_term;
+            };
 
-            // Get 3D Simplex noise: noiseVal is in range [-1, 1]
-            const noiseVal = simplex.noise3D(
-                currentCircleX / LINE_NOISE_SPATIAL_SCALE,
-                currentCircleY / LINE_NOISE_SPATIAL_SCALE,
-                subSteppedCurrentTime * LINE_NOISE_TIME_SCALE
-            );
+            const factor_x1 = calculateFactor(s_val_x1, LINE_ENDPOINT_NOISE_AMOUNT_1);
+            const factor_y1 = calculateFactor(s_val_y1, LINE_ENDPOINT_NOISE_AMOUNT_1);
+            const factor_x2 = calculateFactor(s_val_x2, LINE_ENDPOINT_NOISE_AMOUNT_2);
+            const factor_y2 = calculateFactor(s_val_y2, LINE_ENDPOINT_NOISE_AMOUNT_2);
 
-            // Remap noise from [-1, 1] to [0, 1]
-            const normalizedNoise = (noiseVal + 1.0) / 2.0;
-
-            // Modulate line length based on noise, ensuring it's within defined factors
-            const modulatedLineHalfLength = baseLineHalfLength * 
-                (LINE_NOISE_MIN_LENGTH_FACTOR + normalizedNoise * (LINE_NOISE_MAX_LENGTH_FACTOR - LINE_NOISE_MIN_LENGTH_FACTOR));
-            
-            const noiseVal2 = simplex.noise3D(
-                24 + (currentCircleX / LINE_NOISE_SPATIAL_SCALE),   
-                24 + (currentCircleY / LINE_NOISE_SPATIAL_SCALE),
-                1000 + (subSteppedCurrentTime * LINE_NOISE_TIME_SCALE)
-            );
-            
-            const normalizedNoise2 = (noiseVal2 + 1.0) / 2.0;
-
-            const modulatedLineHalfLength2 = baseLineHalfLength *
-                (LINE_NOISE_MIN_LENGTH_FACTOR + normalizedNoise2 * (LINE_NOISE_MAX_LENGTH_FACTOR - LINE_NOISE_MIN_LENGTH_FACTOR));                
-
-            const startX = currentCircleX - perpDx * modulatedLineHalfLength;
-            const startY = currentCircleY - perpDy * modulatedLineHalfLength;
-            const endX = currentCircleX + perpDx * modulatedLineHalfLength2;
-            const endY = currentCircleY + perpDy * modulatedLineHalfLength2;
+            const startX = canvasCenterX + lissaX * factor_x1;
+            const startY = canvasCenterY + lissaY * factor_y1;
+            const endX = canvasCenterX + lissaX * factor_x2;
+            const endY = canvasCenterY + lissaY * factor_y2;
 
             elementsCtx.beginPath();
             elementsCtx.moveTo(startX, startY);
             elementsCtx.lineTo(endX, endY);
             elementsCtx.stroke();
         } else {
-            // Fallback for zero velocity (draw a small dot)
-            elementsCtx.fillStyle = 'black'; // Use fillStyle for arc
+            // Fallback for Lissajous at the center: draw a small dot
+            elementsCtx.fillStyle = strokeColor; 
             elementsCtx.beginPath();
-            // Use currentCircleX, currentCircleY for the dot position
-            elementsCtx.arc(currentCircleX, currentCircleY, LINE_THICKNESS / 2, 0, Math.PI * 2); 
+            // currentCircleX and currentCircleY would be canvasCenterX/Y here
+            elementsCtx.arc(canvasCenterX, canvasCenterY, LINE_THICKNESS / 2, 0, Math.PI * 2); 
             elementsCtx.fill();
         }
     }

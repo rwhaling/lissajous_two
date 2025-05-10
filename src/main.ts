@@ -4,8 +4,8 @@ import { start } from './draw.ts'
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div>
     <div id="canvas-container">
-      <canvas id="canvas-2d" width="600" height="600"></canvas>
-      <canvas id="canvas-webgl" width="600" height="600"></canvas>
+      <canvas id="canvas-2d" width="800" height="800"></canvas>
+      <canvas id="canvas-webgl" width="800" height="800"></canvas>
     </div>
     <div id="button-container">
       <button id="render-button">Render</button>
