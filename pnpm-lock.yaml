@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@spissvinkel/simplex-noise':
+        specifier: ^1.0.1
+        version: 1.0.1
     devDependencies:
       typescript:
         specifier: ~5.7.2
@@ -267,6 +271,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@spissvinkel/simplex-noise@1.0.1':
+    resolution: {integrity: sha512-Ni1aqFlajxWFxkp2WuCspat6wmrsRZmDv1hgt90hm8J0XkRByd1bzlJFIKw9kC0q5MlOH5GyVrHVR/ZVvhOzqg==}
+
   '@types/estree@1.0.7':
     resolution: {integrity: sha512-w28IoSUCJpidD/TGviZwwMJckNESJZXFu7NBZ5YJ4mEUnNraUn9Pm8HSZm/jDF1pDWYKspWE7oVphigUPRakIQ==}
 
@@ -498,6 +505,8 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.40.0':
     optional: true
+
+  '@spissvinkel/simplex-noise@1.0.1': {}
 
   '@types/estree@1.0.7': {}
 

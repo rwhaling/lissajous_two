@@ -60,5 +60,5 @@ void main() {
         texture2D(u_image, sampleCoord + onePixel * vec2( 1,  2) * u_blurRadius) * 0.015019 +
         texture2D(u_image, sampleCoord + onePixel * vec2( 2,  2) * u_blurRadius) * 0.003765;
 
-    gl_FragColor = colorSum * u_fadeFactor;
+    gl_FragColor = colorSum - (1.0 - u_fadeFactor);
 }

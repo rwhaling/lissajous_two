@@ -2,8 +2,10 @@ import passthroughVertexShader from './shaders/passthrough.vert?raw'
 import simpleGradientFragmentShader from './shaders/simplegradient.frag?raw'
 import spectralCompositeFragmentShader from './shaders/spectralComposite.frag?raw'
 import blurFragmentShader from './shaders/gaussianBlur.frag?raw'
-// import elementAccumulationFragmentShader from './shaders/elementAccumulation.frag?raw' // Removed
+import elementAccumulationFragmentShader from './shaders/elementAccumulation.frag?raw'
 import passthroughTextureFragmentShader from './shaders/passthroughTexture.frag?raw'
+import combineAndPersistGlowFragmentShader from './shaders/combineAndPersistGlow.frag?raw'
+import { mkSimplexNoise, SimplexNoise } from '@spissvinkel/simplex-noise';
 
 let frameCount = 0
 
@@ -30,6 +32,9 @@ let readAccumulationTexture: WebGLTexture;    // Pointer for ping-pong
 let writeAccumulationTexture: WebGLTexture;   // Pointer for ping-pong
 let accumulationFramebuffer: WebGLFramebuffer;
 
+// --- Step (New): Texture for combined input to blur process ---
+let blurProcessInputHolderTexture: WebGLTexture;
+
 // --- Step 5: Add Blur Framebuffer Global ---
 let blurFramebuffer: WebGLFramebuffer; // FBO for blur passes
 
@@ -45,33 +50,46 @@ const TOTAL_FRAMES = 5550; // Example value, adjust as needed
 
 // --- Step 2: Add Blur Parameters ---
 const BLUR_RADIUS = 5.0; // Example blur radius
-const BLUR_PASSES = 10;   // Example blur passes
-const FADE_FACTOR = 0.995; // Example fade factor
+const BLUR_PASSES = 30;   // Example blur passes
+const FADE_FACTOR = 0.97; // Example fade factor
+const GLOW_PERSISTENCE = 0.8; // How much of the old glow persists
 // Keep gradient noise parameters
-let NOISE_CENTER = 0.4;
-let NOISE_WIDTH = 0.55;
-let NOISE_AMPLITUDE = 0.4;
+let NOISE_CENTER = 0.5;
+let NOISE_WIDTH = 1.0;
+let NOISE_AMPLITUDE = 0.6;
 let NOISE_SPEED = 0.4;
 let NOISE_SCALE = 96.0;
 let NOISE_OFFSET_SCALE = 0.7;
 
 // Keep gradient wave parameters
-let WAVE_AMPLITUDE = 0.4;
-let WAVE_XSCALE = 5.5;      // NEW: x scale for the wave
-let WAVE_TIMESCALE = 0.6;   // NEW: time scale for the wave
+let WAVE_AMPLITUDE = 0.25;
+let WAVE_XSCALE = 1.5;      // NEW: x scale for the wave
+let WAVE_TIMESCALE = 0.3;   // NEW: time scale for the wave
 
 // Lissajous Parameters for the moving circle
 const LISSAJOUS_A = 4.25;
 const LISSAJOUS_B = 2.75;
-const LISSAJOUS_RADIUS = 30; // px
-const LISSAJOUS_TIME_SCALE = 1.0; // Adjust for slower/faster movement
+const LISSAJOUS_AMPLITUDE = 200;
+const LISSAJOUS_RADIUS = 10; // px
+const LISSAJOUS_TIME_SCALE = 0.50; // Adjust for slower/faster movement
 
 // Palette Colors
-let GRADIENT_COLOR_A = '#FF0000'; // Base Color A
-let GRADIENT_COLOR_B = '#FFFF00'; // Base Color B
+let GRADIENT_COLOR_A = '#000000'; // Base Color A
+let GRADIENT_COLOR_B = '#0066FF'; // Base Color B
 // --- Step 1: Add New Color Constants ---
-const PALETTE_COLOR_C = '#000000'; // Color for opaque black elements
-const PALETTE_COLOR_D = '#0000FF'; // Color for opaque white elements (unused for now)
+const PALETTE_COLOR_C = '#FFFF00'; // Color for opaque black elements
+const PALETTE_COLOR_D = '#FF00FF'; // Color for opaque white elements (unused for now)
+
+// --- New constants for multi-line drawing ---
+const LINES_PER_FRAME = 1000;
+const LINE_SUB_STEP_FRAME_FRACTION = 0.3 // Each sub-step is 20% of a frame's duration
+const LINE_THICKNESS = 4 // Desired thickness for each individual line segment
+
+// --- New constants for noise modulation of line length ---
+const LINE_NOISE_SPATIAL_SCALE = 350.0; // Adjust for spatial frequency of noise
+const LINE_NOISE_TIME_SCALE = 0.1;    // Adjust for temporal frequency of noise
+const LINE_NOISE_MIN_LENGTH_FACTOR = 0.2; // Min length as factor of LISSAJOUS_RADIUS
+const LINE_NOISE_MAX_LENGTH_FACTOR = 5.2; // Max length as factor of LISSAJOUS_RADIUS
 
 // Add back frame padding helper
 function padFrameNumber(num: number): string {
@@ -86,8 +104,16 @@ let gradientProgram: WebGLProgram;
 let blurProgram: WebGLProgram;
 let spectralCompositeProgram: WebGLProgram;
 // --- Step (New): Add new Program Globals ---
-// let elementAccumulationProgram: WebGLProgram; // Removed
+let elementAccumulationProgram: WebGLProgram;
 let passthroughTextureProgram: WebGLProgram;
+let combineAndPersistGlowProgram: WebGLProgram; // New program
+
+// --- Step (New): Pointers for glow accumulator ping-pong ---
+let readGlowAccumulator: WebGLTexture;
+let writeGlowAccumulator: WebGLTexture;
+
+// --- Global Simplex Noise instance ---
+let simplex: SimplexNoise;
 
 function initWebGL(canvas: HTMLCanvasElement) {
     const localGl = canvas.getContext('webgl', {
@@ -176,6 +202,15 @@ function initWebGL(canvas: HTMLCanvasElement) {
     accumulationFramebuffer = gl.createFramebuffer();
     if (!accumulationFramebuffer) throw new Error("Failed to create accumulationFramebuffer");
 
+    // --- Step (New): Create blurProcessInputHolderTexture ---
+    blurProcessInputHolderTexture = gl.createTexture();
+    if (!blurProcessInputHolderTexture) throw new Error("Failed to create blurProcessInputHolderTexture");
+    gl.bindTexture(gl.TEXTURE_2D, blurProcessInputHolderTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
     // --- Initial Allocation ---
     // Will be done in setup based on actual canvas size
     gl.bindTexture(gl.TEXTURE_2D, null); // Unbind texture
@@ -184,6 +219,9 @@ function initWebGL(canvas: HTMLCanvasElement) {
 
 export function setup({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     initWebGL(canvasWebGL);
+
+    // --- Initialize SimplexNoise ---
+    simplex = mkSimplexNoise(Math.random);
 
     // --- Step 8: Create elements canvas and context ---
     elementsCanvas = document.createElement('canvas');
@@ -214,6 +252,10 @@ export function setup({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     gl.bindTexture(gl.TEXTURE_2D, elementsAccumulationTextureB);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvasWebGL.width, canvasWebGL.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
+    // --- Step (New): Allocate blurProcessInputHolderTexture ---
+    gl.bindTexture(gl.TEXTURE_2D, blurProcessInputHolderTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvasWebGL.width, canvasWebGL.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
     gl.bindTexture(gl.TEXTURE_2D, null); // Unbind
 
     // --- Step (New): Assign initial accumulation textures for ping-pong ---
@@ -225,8 +267,9 @@ export function setup({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     initBlurProgram(gl);
     initSpectralCompositeProgram(gl);
     // --- Step (New): Initialize new programs ---
-    // initElementAccumulationProgram(gl); // Removed
+    initElementAccumulationProgram(gl);
     initPassthroughTextureProgram(gl);
+    initCombineAndPersistGlowProgram(gl); // Initialize new program
 
     // Clear blur textures initially (optional, good practice)
     gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
@@ -244,6 +287,12 @@ export function setup({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, elementsAccumulationTextureB, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
+    // --- Step (New): Clear blurProcessInputHolderTexture initially ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer); // Use any FBO, just need a target
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, blurProcessInputHolderTexture, 0);
+    gl.clearColor(0,0,0,0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Ensure we end unbound
 }
 
@@ -252,10 +301,12 @@ export function draw({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     if (!gl || !framebuffer || !frameTexture ||
         !elementsCanvas || !elementsCtx || !currentFrameElementsTexture ||
         !elementsAccumulationTextureA || !elementsAccumulationTextureB || !accumulationFramebuffer ||
+        !blurProcessInputHolderTexture ||
         !blurFramebuffer || !blurredElementsTexture || !tempBlurTexture ||
         !positionBuffer || !texCoordBuffer ||
         !gradientProgram || !blurProgram || !spectralCompositeProgram ||
-        // !elementAccumulationProgram || // Removed
+        !elementAccumulationProgram ||
+        !combineAndPersistGlowProgram ||
         !passthroughTextureProgram) {
         // This check might technically be redundant now due to types,
         // but kept for explicit runtime safety.
@@ -294,133 +345,209 @@ export function draw({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     // --- Pass 2: Draw CURRENT 2D element to currentFrameElementsTexture ---
-    // Clear the 2D canvas (transparent) - RE-ENABLE THIS
+    // Clear the 2D canvas (transparent)
     elementsCtx.clearRect(0, 0, elementsCanvas.width, elementsCanvas.height);
 
-    // Calculate Lissajous coordinates for the circle
     const canvasCenterX = elementsCanvas.width / 2;
     const canvasCenterY = elementsCanvas.height / 2;
-    
-    // Max amplitude for Lissajous figure to keep the circle within bounds
-    const amplitudeX = (elementsCanvas.width / 2) - LISSAJOUS_RADIUS;
-    const amplitudeY = (elementsCanvas.height / 2) - LISSAJOUS_RADIUS;
-    
-    const lissajousTime = currentTime * LISSAJOUS_TIME_SCALE;
-    
-    // δ = Math.PI / 2 for a common Lissajous shape
-    const circleX = canvasCenterX + amplitudeX * Math.sin(LISSAJOUS_A * lissajousTime + Math.PI / 2);
-    const circleY = canvasCenterY + amplitudeY * Math.sin(LISSAJOUS_B * lissajousTime);
+    // const amplitudeX = (elementsCanvas.width / 2) - LISSAJOUS_RADIUS * 2; 
+    // const amplitudeY = (elementsCanvas.height / 2) - LISSAJOUS_RADIUS * 2; 
 
-    // Draw the black circle at the calculated Lissajous position
-    elementsCtx.fillStyle = 'black'; // Opaque black
-    elementsCtx.beginPath();
-    elementsCtx.arc(circleX, circleY, LISSAJOUS_RADIUS, 0, Math.PI * 2);
-    elementsCtx.fill();
+    const amplitudeX = LISSAJOUS_AMPLITUDE;
+    const amplitudeY = LISSAJOUS_AMPLITUDE;
+
+    const timePerFrame = 1.0 / FRAMES_PER_SECOND;
+    const subStepTimeDelta = timePerFrame * LINE_SUB_STEP_FRAME_FRACTION;
+
+    elementsCtx.strokeStyle = 'black'; // Line color
+    elementsCtx.lineWidth = LINE_THICKNESS; // Set consistent line thickness
+
+    for (let i = 0; i < LINES_PER_FRAME; i++) {
+        const subSteppedCurrentTime = currentTime + i * subStepTimeDelta;
+        const lissajousTime = subSteppedCurrentTime * LISSAJOUS_TIME_SCALE;
+    
+        // Lissajous point for the current sub-step
+        const argX = LISSAJOUS_A * lissajousTime + Math.PI / 2;
+        const argY = LISSAJOUS_B * lissajousTime;
+        const currentCircleX = canvasCenterX + amplitudeX * Math.sin(argX);
+        const currentCircleY = canvasCenterY + amplitudeY * Math.sin(argY);
+
+        // Calculate velocity vector components for the current sub-step
+        const velocityX = amplitudeX * LISSAJOUS_A * Math.cos(argX);
+        const velocityY = amplitudeY * LISSAJOUS_B * Math.cos(argY);
+
+        // Perpendicular vector to velocity
+        let perpDx = -velocityY;
+        let perpDy = velocityX;
+
+        const magnitude = Math.sqrt(perpDx * perpDx + perpDy * perpDy);
+
+        if (magnitude > 0.0001) { 
+            perpDx /= magnitude; // Normalize
+            perpDy /= magnitude; // Normalize
+
+            const baseLineHalfLength = LISSAJOUS_RADIUS;
+
+            // Get 3D Simplex noise: noiseVal is in range [-1, 1]
+            const noiseVal = simplex.noise3D(
+                currentCircleX / LINE_NOISE_SPATIAL_SCALE,
+                currentCircleY / LINE_NOISE_SPATIAL_SCALE,
+                subSteppedCurrentTime * LINE_NOISE_TIME_SCALE
+            );
+
+            // Remap noise from [-1, 1] to [0, 1]
+            const normalizedNoise = (noiseVal + 1.0) / 2.0;
+
+            // Modulate line length based on noise, ensuring it's within defined factors
+            const modulatedLineHalfLength = baseLineHalfLength * 
+                (LINE_NOISE_MIN_LENGTH_FACTOR + normalizedNoise * (LINE_NOISE_MAX_LENGTH_FACTOR - LINE_NOISE_MIN_LENGTH_FACTOR));
+            
+            const noiseVal2 = simplex.noise3D(
+                24 + (currentCircleX / LINE_NOISE_SPATIAL_SCALE),   
+                24 + (currentCircleY / LINE_NOISE_SPATIAL_SCALE),
+                1000 + (subSteppedCurrentTime * LINE_NOISE_TIME_SCALE)
+            );
+            
+            const normalizedNoise2 = (noiseVal2 + 1.0) / 2.0;
+
+            const modulatedLineHalfLength2 = baseLineHalfLength *
+                (LINE_NOISE_MIN_LENGTH_FACTOR + normalizedNoise2 * (LINE_NOISE_MAX_LENGTH_FACTOR - LINE_NOISE_MIN_LENGTH_FACTOR));                
+
+            const startX = currentCircleX - perpDx * modulatedLineHalfLength;
+            const startY = currentCircleY - perpDy * modulatedLineHalfLength;
+            const endX = currentCircleX + perpDx * modulatedLineHalfLength2;
+            const endY = currentCircleY + perpDy * modulatedLineHalfLength2;
+
+            elementsCtx.beginPath();
+            elementsCtx.moveTo(startX, startY);
+            elementsCtx.lineTo(endX, endY);
+            elementsCtx.stroke();
+        } else {
+            // Fallback for zero velocity (draw a small dot)
+            elementsCtx.fillStyle = 'black'; // Use fillStyle for arc
+            elementsCtx.beginPath();
+            // Use currentCircleX, currentCircleY for the dot position
+            elementsCtx.arc(currentCircleX, currentCircleY, LINE_THICKNESS / 2, 0, Math.PI * 2); 
+            elementsCtx.fill();
+        }
+    }
 
     // Upload canvas to currentFrameElementsTexture
     gl.activeTexture(gl.TEXTURE0); // Use a consistent texture unit
     gl.bindTexture(gl.TEXTURE_2D, currentFrameElementsTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, elementsCanvas);
 
-    // --- Pass 2A: Accumulate elements with progressive blur & fading ---
+    // --- Pass 2A: Accumulate elements with fading (Trail Generation) ---
     gl.bindFramebuffer(gl.FRAMEBUFFER, accumulationFramebuffer);
-    // Target 'writeAccumulationTexture' for the entire accumulation step.
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, writeAccumulationTexture, 0);
     gl.viewport(0, 0, width, height);
-    
-    // Step 1: Blur and fade the previous frame's trails ('readAccumulationTexture')
-    // and draw them into 'writeAccumulationTexture'.
-    // The BLUR_PASSES and BLUR_RADIUS will control this blur. FADE_FACTOR controls the fade.
-    
-    let texToBlurAndFade = readAccumulationTexture;
-    let targetForBlurredAndFaded = writeAccumulationTexture; // Initial target for single pass or final target for multi-pass
+    gl.clearColor(0, 0, 0, 0); 
+    gl.clear(gl.COLOR_BUFFER_BIT); // Clear target before drawing faded and new elements
 
-    if (BLUR_PASSES <= 0 || BLUR_RADIUS <= 0) { // If no blur, just fade (or draw if FADE_FACTOR is 1)
-        // This case might need a simple "fade program" if we want to separate fading from blurring completely.
-        // For now, if no blur, the trails won't be processed by blurProgram.
-        // Let's assume blurProgram is always used if accumulation is happening.
-        // If FADE_FACTOR is 1.0 and BLUR_RADIUS is 0, gaussianBlur.frag would effectively be a passthrough.
-        // To handle "no blur but fade", one might reintroduce a dedicated fade shader or ensure gaussianBlur with radius 0 + fade works.
-        // For now, we assume BLUR_RADIUS > 0 for this path.
-        
-        // Fallback: if no blur/fade, just clear and prepare for new element
-        // This part of logic might need refinement based on desired behavior when BLUR_RADIUS = 0
-        gl.clearColor(0,0,0,0);
-        gl.clear(gl.COLOR_BUFFER_BIT); // Clear if not drawing faded/blurred previous state
+    // Step 1: Draw faded previous accumulation state from readAccumulationTexture to writeAccumulationTexture
+    gl.useProgram(elementAccumulationProgram);
+    gl.uniform1f(gl.getUniformLocation(elementAccumulationProgram, "u_fadeFactor"), FADE_FACTOR);
+    gl.uniform1f(gl.getUniformLocation(elementAccumulationProgram, "u_flipY"), 0.0); // Drawing to FBO
 
-    } else {
-        // Use blurFramebuffer for intermediate blur passes if BLUR_PASSES > 1
-        // For BLUR_PASSES = 1, intermediate FBO is not strictly needed, can draw directly.
-        let readForBlur = texToBlurAndFade;
-        let writeForBlurPass = tempBlurTexture; // Use temp for ping-pong if BLUR_PASSES > 1
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, readAccumulationTexture);
+    gl.uniform1i(gl.getUniformLocation(elementAccumulationProgram, "u_image"), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-        for (let i = 0; i < BLUR_PASSES; ++i) {
-            const isLastPass = (i === BLUR_PASSES - 1);
-            const currentTargetTexture = isLastPass ? targetForBlurredAndFaded : writeForBlurPass;
-            const effectiveFadeFactor = isLastPass ? FADE_FACTOR : 1.0; // Apply fade only on the final output of blur stage
-
-            // Bind FBO for the current blur pass output
-            if (isLastPass) {
-                 // Final pass writes to accumulationFramebuffer's 'writeAccumulationTexture'
-                gl.bindFramebuffer(gl.FRAMEBUFFER, accumulationFramebuffer); // Already bound from start of Pass 2A
-                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, currentTargetTexture, 0);
-            } else {
-                // Intermediate passes write to blurFramebuffer's 'tempBlurTexture' (or 'writeForBlurPass')
-                gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
-                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, currentTargetTexture, 0);
-            }
-            gl.viewport(0, 0, width, height);
-            gl.clearColor(0, 0, 0, 0); // Clear target before drawing blurred content
-            gl.clear(gl.COLOR_BUFFER_BIT);
-
-            gl.useProgram(blurProgram);
-            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_blurRadius"), BLUR_RADIUS);
-            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_fadeFactor"), effectiveFadeFactor);
-            gl.uniform2f(gl.getUniformLocation(blurProgram, "u_resolution"), width, height);
-            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_time"), currentTime); // Pass time
-            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_flipY"), 0.0); // Drawing to FBO
-
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, readForBlur);
-            gl.uniform1i(gl.getUniformLocation(blurProgram, "u_image"), 0);
-            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-            if (!isLastPass) {
-                [readForBlur, writeForBlurPass] = [writeForBlurPass, readForBlur]; // Ping-pong
-            } else {
-                // 'targetForBlurredAndFaded' (which is 'writeAccumulationTexture') now has the result.
-            }
-        }
-        // Ensure we are back to accumulationFramebuffer if multiple blur passes used blurFramebuffer
-        gl.bindFramebuffer(gl.FRAMEBUFFER, accumulationFramebuffer);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, writeAccumulationTexture, 0);
-        gl.viewport(0, 0, width, height); // Reset viewport if it changed
-    }
-
-    // Step 2: Draw current frame's elements ('currentFrameElementsTexture')
-    // on top of 'writeAccumulationTexture' (which now contains blurred & faded trails).
+    // Step 2: Draw current frame's elements on top of writeAccumulationTexture using blending
     gl.useProgram(passthroughTextureProgram);
     gl.uniform1f(gl.getUniformLocation(passthroughTextureProgram, "u_flipY"), 0.0); // Drawing to FBO
 
-    gl.activeTexture(gl.TEXTURE0);
+    gl.activeTexture(gl.TEXTURE0); 
     gl.bindTexture(gl.TEXTURE_2D, currentFrameElementsTexture);
     gl.uniform1i(gl.getUniformLocation(passthroughTextureProgram, "u_image"), 0);
 
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); // Standard alpha blending
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.disable(gl.BLEND);
 
-    // Ping-pong accumulation textures
+    // Ping-pong accumulation textures. readAccumulationTexture now holds the sharp, faded trails.
     [readAccumulationTexture, writeAccumulationTexture] = [writeAccumulationTexture, readAccumulationTexture];
+    const fadedTrailTexture = readAccumulationTexture; // This is our sharp trail
 
-    // --- Pass 3: Blur accumulated elements (REMOVED as blur is now progressive) ---
-    // let readTex = readAccumulationTexture; 
-    // let writeTex = blurredElementsTexture;
-    // let finalBlurredTexture = readAccumulationTexture; 
-    // if (BLUR_PASSES > 0 && BLUR_RADIUS > 0) { ... } else { ... }
-    // The final result of accumulation (which has been progressively blurred) is in readAccumulationTexture
-    const finalBlurredTexture = readAccumulationTexture;
+    // --- Pass 2B: Dedicated Blur Pass for Bloom "Glow" (Now Progressive) ---
+    
+    // Setup ping-pong pointers for glow accumulation if not already done (e.g. first frame)
+    // This should ideally be in setup, but for safety if draw is called before full setup completion
+    // or if we want to reset, this is a fallback.
+    // More robustly, ensure they are assigned in setup.
+    if (!readGlowAccumulator || !writeGlowAccumulator) {
+        readGlowAccumulator = blurredElementsTexture; // Initially, read from blurredElementsTexture
+        writeGlowAccumulator = tempBlurTexture;      // Initially, write to tempBlurTexture
+    }
+
+    // Step 2B.a: Combine current sharp trails with faded previous glow
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer); // Use blur FBO for this temporary draw
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, blurProcessInputHolderTexture, 0);
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.useProgram(combineAndPersistGlowProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fadedTrailTexture);
+    gl.uniform1i(gl.getUniformLocation(combineAndPersistGlowProgram, "u_newContributionTex"), 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, readGlowAccumulator); // Previous frame's accumulated glow
+    gl.uniform1i(gl.getUniformLocation(combineAndPersistGlowProgram, "u_previousGlowTex"), 1);
+    
+    gl.uniform1f(gl.getUniformLocation(combineAndPersistGlowProgram, "u_glowPersistence"), GLOW_PERSISTENCE);
+    gl.uniform1f(gl.getUniformLocation(combineAndPersistGlowProgram, "u_flipY"), 0.0); // Drawing to FBO
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Step 2B.b: Multi-Pass Gaussian Blur on the combined result
+    let readTexForBloomBlur = blurProcessInputHolderTexture;       // Start with the combined texture
+    let tempTargetForBlurLoop = readGlowAccumulator;             // Use the non-final glow accum as temp for blur's internal ping-pong
+    const finalTargetForBloom = writeGlowAccumulator;            // Final blurred glow goes here
+
+    if (BLUR_PASSES > 0 && BLUR_RADIUS > 0) {
+        for (let i = 0; i < BLUR_PASSES; ++i) {
+            const isLastPass = (i === BLUR_PASSES - 1);
+            const currentWriteTarget = isLastPass ? finalTargetForBloom : tempTargetForBlurLoop;
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, currentWriteTarget, 0);
+            gl.viewport(0, 0, width, height);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.useProgram(blurProgram);
+            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_blurRadius"), BLUR_RADIUS);
+            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_fadeFactor"), 1.0); // No fading here
+            gl.uniform2f(gl.getUniformLocation(blurProgram, "u_resolution"), width, height);
+            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_time"), currentTime);
+            gl.uniform1f(gl.getUniformLocation(blurProgram, "u_flipY"), 0.0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, readTexForBloomBlur);
+            gl.uniform1i(gl.getUniformLocation(blurProgram, "u_image"), 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            if (!isLastPass) {
+                [readTexForBloomBlur, tempTargetForBlurLoop] = [tempTargetForBlurLoop, readTexForBloomBlur]; 
+            }
+        }
+    } else {
+        // If no blur, copy the combined input (or clear) to the final target to maintain consistency
+        gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, finalTargetForBloom, 0);
+        // Option 1: Copy combined (passthrough shader would be needed)
+        // For simplicity, let's clear if no blur, meaning no progressive glow if blur is off.
+        // Or, draw blurProcessInputHolderTexture into finalTargetForBloom using passthroughTextureProgram
+        gl.clearColor(0,0,0,0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    
+    // Step 2B.c: Ping-Pong Glow Accumulators
+    [readGlowAccumulator, writeGlowAccumulator] = [writeGlowAccumulator, readGlowAccumulator];
+    const blurredTrailGlowTexture = readGlowAccumulator; // This now holds the latest accumulated glow
 
     // --- Pass 4: Composite to screen using spectral shader ---
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Render to screen
@@ -432,10 +559,15 @@ export function draw({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
     gl.bindTexture(gl.TEXTURE_2D, frameTexture);
     gl.uniform1i(gl.getUniformLocation(spectralCompositeProgram, "u_gradientTex"), 0);
 
-    // Bind blurred elements texture to unit 1
+    // Bind sharp, faded trails texture to unit 1
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, finalBlurredTexture); // Use the result from blur pass
-    gl.uniform1i(gl.getUniformLocation(spectralCompositeProgram, "u_elementsTex"), 1);
+    gl.bindTexture(gl.TEXTURE_2D, fadedTrailTexture); 
+    gl.uniform1i(gl.getUniformLocation(spectralCompositeProgram, "u_fadedTrailTex"), 1); // New uniform name
+
+    // Bind blurred glow texture to unit 2
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, blurredTrailGlowTexture);
+    gl.uniform1i(gl.getUniformLocation(spectralCompositeProgram, "u_blurredTrailGlowTex"), 2); // New uniform name
 
     // Set palette color uniforms
     const colorA_Palette = hexToRgb01(GRADIENT_COLOR_A);
@@ -651,6 +783,49 @@ function hexToRgb01(hex: string): [number, number, number] {
     ];
 }
 
+// --- Step (New): Implement initElementAccumulationProgram ---
+function initElementAccumulationProgram(gl: WebGLRenderingContext) {
+    const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+    if (!vertexShader) throw new Error("Couldn't create vertex shader for element accumulation");
+    gl.shaderSource(vertexShader, passthroughVertexShader);
+    gl.compileShader(vertexShader);
+    if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+        console.error("Vertex shader (element_accumulation) compile error:", gl.getShaderInfoLog(vertexShader));
+        throw new Error("Failed to compile element accumulation vertex shader");
+    }
+
+    const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    if (!fragmentShader) throw new Error("Couldn't create fragment shader for element accumulation");
+    gl.shaderSource(fragmentShader, elementAccumulationFragmentShader);
+    gl.compileShader(fragmentShader);
+    if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+        console.error("Fragment shader (element_accumulation) compile error:", gl.getShaderInfoLog(fragmentShader));
+        throw new Error("Failed to compile element accumulation fragment shader");
+    }
+
+    const localProgram = gl.createProgram();
+    if (!localProgram) throw new Error("Couldn't create element accumulation program");
+    elementAccumulationProgram = localProgram;
+    gl.attachShader(elementAccumulationProgram, vertexShader);
+    gl.attachShader(elementAccumulationProgram, fragmentShader);
+    gl.linkProgram(elementAccumulationProgram);
+    if (!gl.getProgramParameter(elementAccumulationProgram, gl.LINK_STATUS)) {
+        console.error("Program (element_accumulation) link error:", gl.getProgramInfoLog(elementAccumulationProgram));
+        throw new Error("Failed to link element accumulation program");
+    }
+
+    gl.useProgram(elementAccumulationProgram);
+    const positionLocation = gl.getAttribLocation(elementAccumulationProgram, "a_position");
+    gl.enableVertexAttribArray(positionLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    const texCoordLocation = gl.getAttribLocation(elementAccumulationProgram, "a_texCoord");
+    gl.enableVertexAttribArray(texCoordLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+    gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+}
+
 // --- Step (New): Implement initPassthroughTextureProgram ---
 function initPassthroughTextureProgram(gl: WebGLRenderingContext) {
     const vertexShader = gl.createShader(gl.VERTEX_SHADER);
@@ -689,6 +864,51 @@ function initPassthroughTextureProgram(gl: WebGLRenderingContext) {
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
     const texCoordLocation = gl.getAttribLocation(passthroughTextureProgram, "a_texCoord");
+    gl.enableVertexAttribArray(texCoordLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+    gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+}
+
+// --- Step (New): Implement initCombineAndPersistGlowProgram ---
+function initCombineAndPersistGlowProgram(gl: WebGLRenderingContext) {
+    const fragShaderSource = combineAndPersistGlowFragmentShader;
+
+    const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+    if (!vertexShader) throw new Error("Couldn't create vertex shader for combine/persist glow");
+    gl.shaderSource(vertexShader, passthroughVertexShader);
+    gl.compileShader(vertexShader);
+    if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+        console.error("Vertex shader (combine/persist glow) compile error:", gl.getShaderInfoLog(vertexShader));
+        throw new Error("Failed to compile combine/persist glow vertex shader");
+    }
+
+    const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    if (!fragmentShader) throw new Error("Couldn't create fragment shader for combine/persist glow");
+    gl.shaderSource(fragmentShader, fragShaderSource);
+    gl.compileShader(fragmentShader);
+    if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+        console.error("Fragment shader (combine/persist glow) compile error:", gl.getShaderInfoLog(fragmentShader));
+        throw new Error("Failed to compile combine/persist glow fragment shader");
+    }
+
+    const localProgram = gl.createProgram();
+    if (!localProgram) throw new Error("Couldn't create combine/persist glow program");
+    combineAndPersistGlowProgram = localProgram;
+    gl.attachShader(combineAndPersistGlowProgram, vertexShader);
+    gl.attachShader(combineAndPersistGlowProgram, fragmentShader);
+    gl.linkProgram(combineAndPersistGlowProgram);
+    if (!gl.getProgramParameter(combineAndPersistGlowProgram, gl.LINK_STATUS)) {
+        console.error("Program (combine/persist glow) link error:", gl.getProgramInfoLog(combineAndPersistGlowProgram));
+        throw new Error("Failed to link combine/persist glow program");
+    }
+
+    gl.useProgram(combineAndPersistGlowProgram);
+    const positionLocation = gl.getAttribLocation(combineAndPersistGlowProgram, "a_position");
+    gl.enableVertexAttribArray(positionLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    const texCoordLocation = gl.getAttribLocation(combineAndPersistGlowProgram, "a_texCoord");
     gl.enableVertexAttribArray(texCoordLocation);
     gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
     gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);

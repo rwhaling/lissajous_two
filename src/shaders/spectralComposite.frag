@@ -298,40 +298,41 @@ vec3 spectral_mix(vec3 color1, float factor1, vec3 color2, float factor2, vec3 c
 #endif
 
 
-uniform sampler2D u_gradientTex;  // Grayscale gradient (0..1 intensity)
-uniform sampler2D u_elementsTex;  // Blurred elements texture (RGBA)
-uniform vec3 u_colorA;           // Palette Color A (from TS global)
-uniform vec3 u_colorB;           // Palette Color B (from TS global)
-uniform vec3 u_colorC;           // Palette Color C
-uniform vec3 u_colorD;           // Palette Color D
-uniform float u_flipY;           // 1.0 for drawing to screen, 0.0 for FBO
+uniform sampler2D u_gradientTex;         // Background B&W gradient
+uniform sampler2D u_fadedTrailTex;       // Sharp, faded trails (alpha from black circle)
+uniform sampler2D u_blurredTrailGlowTex; // Blurred version for bloom (alpha from black circle)
 
+uniform vec3 u_colorA; // Gradient color 1 (e.g., Red)
+uniform vec3 u_colorB; // Gradient color 2 (e.g., Yellow)
+uniform vec3 u_colorC; // Color for the "core" element/trail (e.g., Black)
+uniform vec3 u_colorD; // Color for the "bloom" effect (e.g., Blue)
+
+uniform float u_flipY;
 varying vec2 v_texCoord;
 
 void main() {
-  // Handle coordinate flipping
-  vec2 uv = v_texCoord;
-  uv.y = mix(uv.y, 1.0 - uv.y, u_flipY);
+    vec2 texCoord = v_texCoord;
+    if (u_flipY > 0.5) { // Flip if drawing to screen
+        texCoord.y = 1.0 - texCoord.y;
+    }
 
-  // Sample textures
-  vec4 gradientColor = texture2D(u_gradientTex, uv);
-  vec4 elementsColor = texture2D(u_elementsTex, uv);
+    vec4 gradientSample = texture2D(u_gradientTex, texCoord);
+    vec4 fadedTrailAlphaSample = texture2D(u_fadedTrailTex, texCoord);     // RGB is (0,0,0) if trail was black
+    vec4 blurredTrailAlphaSample = texture2D(u_blurredTrailGlowTex, texCoord); // RGB is (0,0,0) if trail was black
 
-  // Extract intensity/alpha
-  float gradientIntensity = gradientColor.r; // Assuming gradient is R=G=B
-  float elementsAlpha = elementsColor.a;     // Use alpha from blurred elements
+    // 1. Determine base color from the gradient
+    vec3 baseColor = mix(u_colorA, u_colorB, gradientSample.r);
 
-  // Calculate the spectral mix between A and B based on the gradient
-  vec3 mixAB = spectral_mix(u_colorA, u_colorB, gradientIntensity);
+    // 2. Alpha-blend the core trail color (u_colorC) onto the baseColor.
+    // The visibility of u_colorC is determined by fadedTrailAlphaSample.a.
+    vec3 blendedCoreTrailColor = mix(baseColor, u_colorC, fadedTrailAlphaSample.a);
 
-  // Calculate the spectral mix between C and D based on the gradient
-  vec3 mixCD = spectral_mix(u_colorC, u_colorD, gradientIntensity);
+    // 3. Additively blend the bloom effect on top.
+    // The bloom color (u_colorD) is scaled by blurredTrailAlphaSample.a.
+    vec3 finalColor = blendedCoreTrailColor + (u_colorD * blurredTrailAlphaSample.a);
 
-  // Interpolate between the AB mix and the CD mix based on the element alpha
-  // When elementsAlpha is 0, we get mixAB.
-  // When elementsAlpha is 1, we get mixCD.
-  vec3 finalColor = mix(mixAB, mixCD, elementsAlpha);
+    // Clamp final color to [0, 1] range (important for additive blending)
+    finalColor = clamp(finalColor, 0.0, 1.0);
 
-  // Output the final color, assume full opacity for now
-  gl_FragColor = vec4(finalColor, 1.0);
+    gl_FragColor = vec4(finalColor, 1.0); // Output to screen is always opaque
 }
