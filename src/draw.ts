@@ -83,7 +83,7 @@ const PALETTE_COLOR_D = '#8800FF'; // Color for opaque white elements (unused fo
 // --- New constants for multi-line drawing ---
 const LINES_PER_FRAME = 1;
 const LINE_SUB_STEP_FRAME_FRACTION = 0.2 // Each sub-step is 20% of a frame's duration
-const LINE_THICKNESS = 2 // Desired thickness for each individual line segment
+const LINE_THICKNESS = 3 // Desired thickness for each individual line segment
 
 // --- New constants for noise modulation of line length ---
 const LINE_NOISE_SPATIAL_SCALE = 550.0; // Adjust for spatial frequency of noise
