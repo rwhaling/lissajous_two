@@ -49,10 +49,10 @@ let dirHandle: FileSystemDirectoryHandle | null = null;
 const TOTAL_FRAMES = 5550; // Example value, adjust as needed
 
 // --- Step 2: Add Blur Parameters ---
-const BLUR_RADIUS = 4.0; // Example blur radius
-const BLUR_PASSES = 5;   // Example blur passes
+const BLUR_RADIUS = 8.0; // Example blur radius
+const BLUR_PASSES = 1;   // Example blur passes
 const FADE_FACTOR = 0.995; // Example fade factor
-const GLOW_PERSISTENCE = 0.98; // How much of the old glow persists
+const GLOW_PERSISTENCE = 0.97; // How much of the old glow persists
 // Keep gradient noise parameters
 let NOISE_CENTER = 0.0;
 let NOISE_WIDTH = 1.1;
@@ -119,6 +119,13 @@ let writeGlowAccumulator: WebGLTexture;
 
 // --- Global Simplex Noise instance ---
 let simplex: SimplexNoise;
+
+// --- Define CanvasContexts Interface ---
+interface CanvasContexts {
+    canvasWebGL: HTMLCanvasElement;
+    // If you also use a 2D canvas, add it here:
+    canvas2d?: HTMLCanvasElement;
+}
 
 function initWebGL(canvas: HTMLCanvasElement) {
     const localGl = canvas.getContext('webgl', {
@@ -595,7 +602,8 @@ export function draw({ /*canvas2d,*/ canvasWebGL }: CanvasContexts) {
 // Add back rendering control functions
 async function startRendering() {
     try {
-        dirHandle = await window.showDirectoryPicker();
+        // Cast window to any to bypass the type error for showDirectoryPicker
+        dirHandle = await (window as any).showDirectoryPicker();
         currentFrameNumber = 0;
         isRendering = true;
         console.log('Starting render sequence...');
