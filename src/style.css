@@ -33,7 +33,7 @@ html, body {
 
 #button-container {
   position: absolute;
-  top: 680px; /* 40px initial margin + 600px canvas height + 40px spacing */
+  top: 900px; /* 40px initial margin + 600px canvas height + 40px spacing */
   left: 0;
   width: 100%;
   display: flex;

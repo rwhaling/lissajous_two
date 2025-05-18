@@ -46,7 +46,7 @@ let FRAMES_PER_SECOND = 60;
 let isRendering = false;
 let currentFrameNumber = 0;
 let dirHandle: FileSystemDirectoryHandle | null = null;
-const TOTAL_FRAMES = 5550; // Example value, adjust as needed
+const TOTAL_FRAMES = 9360; // Example value, adjust as needed
 
 // --- Step 2: Add Blur Parameters ---
 const BLUR_RADIUS = 8.0; // Example blur radius
